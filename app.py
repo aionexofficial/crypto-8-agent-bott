@@ -8,6 +8,7 @@ import market_engine as m
 import solana_agents as agents
 from reports import report
 import hmac
+from datetime import datetime, timezone
 from telegram_alerts import notify
 st.set_page_config(page_title="Kripto Masası V8",page_icon="🤖")
 st.title("🤖 8 Ajanlı Kripto Masası V8")
@@ -92,6 +93,21 @@ def panel():
     st.dataframe([dict(time=t,kind=k,detail=p) for t,k,p in events[:200]])
     st.subheader("Günlük performans (UTC)")
     daily=report(events)
+    today=datetime.now(timezone.utc).date().isoformat()
+    if authorized and mode=="RUNNING" and tg_token and tg_chat:
+        previous=[d for d in daily if d["UTC gün"]<today]
+        if previous:
+            d=previous[-1]
+            day=d["UTC gün"]
+            with db.transaction() as c:
+                c.execute("CREATE TABLE IF NOT EXISTS daily_alerts (day TEXT PRIMARY KEY)")
+                claimed=c.execute("INSERT OR IGNORE INTO daily_alerts VALUES (?)",(day,)).rowcount==1
+            if claimed:
+                msg=f"V8 SANAL RAPOR (UTC) {day}\nİşlem: {d['Sanal işlem']}\nRed: {d['Red']}\nNet arbitraj farkı: {d['Net fark USDT']:.6f} USDT\nSon portföy: {state['equity']:.4f} USDT"
+                if not notify(tg_token,tg_chat,msg):
+                    with db.transaction() as c:
+                        c.execute("DELETE FROM daily_alerts WHERE day=?",(day,))
+                    st.warning("Günlük Telegram raporu gönderilemedi; sonraki taramada tekrar denenir.")
     st.dataframe(daily)
     if daily: st.line_chart(daily,x="UTC gün",y="Net fark USDT")
     st.caption("30 günlük test hedefi; gözlenen gün: "+str(len(daily))+". Kesintisiz çalışma kanıtı değildir.")
