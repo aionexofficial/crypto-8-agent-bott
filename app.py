@@ -115,7 +115,7 @@ def panel():
 panel()
 
 from stress_test import stress
-st.subheader("Agresif stres testi — %30")
+st.subheader("Agresif stres testi — %10")
 st.caption("50 yapay fiyat senaryosu; yönsel risk testi, canlı arbitraj değil. Normal bakiye değişmez.")
 if authorized and st.button("50 agresif sanal test çalıştır"):
     st.session_state["stress_results"]=stress()
