@@ -8,6 +8,7 @@ import market_engine as m
 import solana_agents as agents
 from reports import report
 import hmac
+from telegram_alerts import notify
 st.set_page_config(page_title="Kripto Masası V8",page_icon="🤖")
 st.title("🤖 8 Ajanlı Kripto Masası V8")
 st.caption("Ücretsiz Streamlit modu • yalnızca sanal işlemler")
@@ -18,6 +19,14 @@ except Exception: secret=""
 password=st.text_input("Yönetici şifresi",type="password")
 authorized=bool(secret) and hmac.compare_digest(password,secret)
 if not authorized: st.info("Yönetim kilitli. Streamlit Secrets içinde PANEL_PASSWORD ayarlayın.")
+try:
+    tg_token=st.secrets.get("TELEGRAM_BOT_TOKEN","")
+    tg_chat=st.secrets.get("TELEGRAM_CHAT_ID","")
+except Exception: tg_token,tg_chat="",""
+if authorized:
+    if st.button("Telegram test bildirimi",disabled=not bool(tg_token and tg_chat)):
+        if notify(tg_token,tg_chat,"V8 test: yalnızca sanal işlemler."): st.success("Telegram bildirimi gönderildi")
+        else: st.error("Telegram bildirimi başarısız")
 with db.transaction() as c:
     mode,_,_,_=db.read(c)
 for label,action in [("Başlat","START"),("Durdur","STOP"),("ACİL DURDUR","EMERGENCY"),("Acil kilidi sıfırla (başlatmaz)","RESET")]:
@@ -43,11 +52,13 @@ def panel():
                 except Exception as e: state["errors"].append(str(e)[:180])
             try: p,reason=m.plan(state,quotes)
             except Exception as e: p,reason=None,str(e)[:180]
+            committed=False
             with db.transaction() as c:
                 current,generation,_,_=db.read(c)
                 if current=="RUNNING" and generation==epoch:
                     if p:
                         db.event(c,"PAPER",p)
+                        committed=True
                         state["cash"][p["buy"]]-=p["paid"]
                         state["cash"][p["sell"]]+=p["received"]
                         state["inventory"][p["bk"]]+=p["qty"]
@@ -59,6 +70,8 @@ def panel():
                         state["equity"]=sum(state["cash"].values())+sum(q*marks[k] for k,q in state["inventory"].items())
                     state["last_scan"]=time.time()
                     c.execute("UPDATE state SET payload=?,heartbeat=? WHERE id=1",(json.dumps(state,allow_nan=False),time.time()))
+            if committed and not notify(tg_token,tg_chat,f"V8 SANAL: {p['symbol']} {p['buy']} → {p['sell']} | Net fark: {p['pnl']:.6f} USDT") and tg_token and tg_chat:
+                st.warning("Telegram bildirimi gönderilemedi")
         except Exception as e: st.error(str(e)[:180])
     with db.transaction() as c:
         mode,_,state,hb=db.read(c)
