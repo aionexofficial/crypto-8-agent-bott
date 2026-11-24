@@ -113,3 +113,14 @@ def panel():
     st.caption("30 günlük test hedefi; gözlenen gün: "+str(len(daily))+". Kesintisiz çalışma kanıtı değildir.")
     st.download_button("Günlüğü indir",json.dumps(events,ensure_ascii=False),"paper-log.json","application/json")
 panel()
+
+from stress_test import stress
+st.subheader("Agresif stres testi — %30")
+st.caption("50 yapay fiyat senaryosu; yönsel risk testi, canlı arbitraj değil. Normal bakiye değişmez.")
+if authorized and st.button("50 agresif sanal test çalıştır"):
+    st.session_state["stress_results"]=stress()
+if authorized and "stress_results" in st.session_state:
+    results=st.session_state["stress_results"]
+    st.metric("Test sonu sanal bakiye",f'{results[-1]["Bakiye"]:.2f} USDT')
+    st.line_chart([r["Bakiye"] for r in results])
+    st.dataframe(results)
