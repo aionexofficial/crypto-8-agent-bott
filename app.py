@@ -2,6 +2,8 @@ import streamlit as st
 import requests
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+import time
+import math
 
 st.set_page_config(page_title="8 Agent Paper Desk", page_icon="🤖", layout="wide")
 CAPITAL = 1000.0
@@ -200,45 +202,128 @@ def cycle():
         except Exception as exc:
             s["errors"].append("Solana: "+str(exc)[:150])
 
+
+# Public order books only. No authenticated endpoints or order methods.
+def depth(venue, symbol):
+    if venue == "Binance":
+        d = api("https://data-api.binance.vision/api/v3/depth", {"symbol":symbol,"limit":20})
+    elif venue == "Bitget":
+        d = api("https://api.bitget.com/api/v2/spot/market/orderbook", {"symbol":symbol,"limit":"20"})["data"]
+    else:
+        d = api("https://api.huobi.pro/market/depth", {"symbol":symbol.lower(),"type":"step0","depth":20})["tick"]
+    return {side: [(float(p),float(q)) for p,q,*_ in d[side] if float(p)>0 and float(q)>0] for side in ("asks","bids")}
+
+def fill(levels, qty):
+    left, value = qty, 0.0
+    for p,q in levels:
+        take = min(left,q)
+        value += take*p
+        left -= take
+        if left <= 1e-10:
+            return value
+    raise ValueError("Yetersiz emir defteri derinliği")
+
+def simulate(candidate, capital, fee):
+    symbol, buy, sell = candidate["Pair"], candidate["Buy"], candidate["Sell"]
+    started = time.monotonic()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        a = pool.submit(depth,buy,symbol)
+        b = pool.submit(depth,sell,symbol)
+        asks = sorted(a.result()["asks"])
+        bids = sorted(b.result()["bids"],reverse=True)
+    if time.monotonic()-started > 3 or not asks or not bids:
+        raise ValueError("Veri gecikmesi veya boş defter")
+    # Reserve fee and worst allowed slippage within the 1% budget.
+    budget = min(capital*0.01,10.0)
+    qty = budget/(asks[0][0]*(1+MAX_SLIPPAGE)*(1+fee))
+    cost, proceeds = fill(asks,qty),fill(bids,qty)
+    slip_buy = cost/qty/asks[0][0]-1
+    slip_sell = 1-proceeds/qty/bids[0][0]
+    if max(slip_buy,slip_sell)>MAX_SLIPPAGE or cost*(1+fee)>budget:
+        raise ValueError("Kayma veya sermaye limiti")
+    pnl = proceeds*(1-fee)-cost*(1+fee)
+    if not math.isfinite(pnl) or pnl<=0:
+        raise ValueError("Komisyon sonrası pozitif fark yok")
+    return pnl, cost*(1+fee), max(slip_buy,slip_sell)*100
+
 st.title("🤖 8 Ajanlı Kripto Masası V2")
 st.caption("Sadece simülasyon • Gerçek emir, cüzdan ve para çekme yok")
-st.warning("Sanal işlemler varsayımsal eşzamanlı dolumdur. Gerçek kâr garantisi yok. Solana işlemleri güvenlik doğrulaması eksik olduğu için kapalı.")
-auto=st.toggle("Otomatik tarama (ekran açıkken, 20 saniye)",value=False)
-manual=st.button("Şimdi tüm piyasaları tara",type="primary")
-if st.button("Sanal oturumu sıfırla"):
-    st.session_state.v2=initial()
-    st.rerun()
+s=st.session_state
+if "ledger" not in s:
+    s.ledger=[]
+    s.balance=CAPITAL
+    s.curve=[CAPITAL]
+    s.last_sol=0.0
+    s.quotes=[]
+    s.errors=[]
+    s.opps=[]
+auto=st.toggle("Otomatik tarama (sayfa açıkken, 30 saniye)",value=False)
+paper=st.toggle("Varsayımsal arbitraj simülasyonu",value=False)
+fee=st.number_input("Varsayılan tek yön komisyon (%)",min_value=0.0,max_value=2.0,value=0.1,step=0.01)/100
+st.warning("Simülasyon iki borsada önceden hazır envanter ve eşzamanlı dolum varsayar. Gerçek bakiye, minimum emir, transfer, yeniden dengeleme ve ağ gecikmesi modellenmez. Solana işlemleri güvenlik kontrolleri eksik olduğu için kapalı.")
 
-@st.fragment(run_every=20 if auto else None)
-def dashboard():
-    if auto or manual:
-        with st.spinner("Piyasalar taranıyor..."):
-            cycle()
+@st.fragment(run_every=30 if auto else None)
+def panel():
+    if st.button("Borsaları tara",type="primary") or auto:
+        s.quotes,s.errors=scan_exchanges()
+        s.opps=compare(s.quotes)
+        s.quote_time=datetime.now(timezone.utc).isoformat()
+        if paper:
+            for candidate in s.opps[:1]:
+                entry={"Zaman":s.quote_time,"Parite":candidate["Pair"],"Alış":candidate["Buy"],"Satış":candidate["Sell"],"K/Z":0.0}
+                try:
+                    pnl,cost,slip=simulate(candidate,s.balance,fee)
+                    entry.update({"Durum":"Varsayımsal dolum","K/Z":pnl,"Tutar":cost,"Kayma %":slip})
+                    s.ledger.append(entry)
+                    s.balance+=pnl
+                    s.curve.append(s.balance)
+                except Exception as exc:
+                    entry["Durum"]="Reddedildi: "+str(exc)[:150]
+                    s.ledger.append(entry)
+        if auto and time.monotonic()-s.last_sol>=120:
+            s.last_sol=time.monotonic()
+            try:
+                s.solana=scan_solana()
+                s.sol_error=""
+            except Exception as exc:
+                s.sol_error=str(exc)[:180]
     a,b,c=st.columns(3)
-    a.metric("Başlangıç","1.000 USDT")
-    b.metric("Sanal gerçekleşen net",f"{s['pnl']:.6f} USDT")
+    a.metric("Sanal bakiye",f"{s.balance:.4f} USDT")
+    b.metric("Sanal K/Z",f"{s.balance-CAPITAL:+.4f}")
     c.metric("İşlem üst sınırı","10 USDT / %1")
-    st.caption("Kayma sınırı %2; komisyon varsayımı her yönde %0,1. Başlangıçta 500 USDT nakit, 500 USDT eşit dağıtılmış sanal coin envanteri. Transfer ve yeniden dengeleme yok.")
-    if s["last_scan"]:
-        st.caption("Son tarama UTC: "+s["last_scan"])
-    if s["errors"]:
-        st.info("Veri uyarıları: "+"; ".join(s["errors"]))
-    st.subheader("Sanal net işlem kârı grafiği")
-    st.line_chart(pd.DataFrame({"Net USDT":s["curve"]}))
+    st.caption("Son tarama UTC: "+s.get("quote_time","Henüz yok"))
+    if s.errors:
+        st.info("Veri hataları: "+"; ".join(s.errors))
     st.subheader("Borsa fiyatları")
-    st.dataframe(s["quotes"],use_container_width=True)
-    st.subheader("İşlem geçmişi")
-    st.dataframe(list(reversed(s["history"])),use_container_width=True)
-    if s["history"]:
-        st.download_button("İşlem geçmişini indir",pd.DataFrame(s["history"]).to_csv(index=False),"islemler.csv","text/csv")
+    st.dataframe(s.quotes,use_container_width=True)
+    st.subheader("Brüt farklar (gösterge, kesin kâr değil)")
+    st.dataframe([{k:v for k,v in x.items() if k not in ("Decision","Illustrative net %")} for x in s.opps],use_container_width=True)
     st.subheader("Solana token taraması")
-    st.dataframe(s["solana"],use_container_width=True)
-    st.subheader("8 ajan durumu")
-    st.table([{"Ajan":n,"Durum":d} for n,d in [
-        ("Tarayıcı","Borsa ve Solana profilleri"),("Risk","Limit, derinlik, komisyon ve kayma modeli"),
-        ("Nişancı","Sanal eşzamanlı arbitraj"),("Balina","Henüz entegre değil"),
-        ("Rug","Solana işlemleri kilitli"),("Çıkış","Arbitrajın iki ayağı; açık pozisyon stop motoru yok"),
-        ("Hype","Henüz entegre değil"),("Masa yöneticisi","Panel ve oturum kayıtları")]])
-    st.caption("Oturum kapanırsa tarama durabilir ve kayıtlar silinebilir. 7/24 servis değildir.")
-
-dashboard()
+    if st.button("Solana tara"):
+        try:
+            s.solana=scan_solana()
+            s.sol_error=""
+        except Exception as exc:
+            s.sol_error=str(exc)[:180]
+    if s.get("sol_error"):
+        st.error(s.sol_error)
+    if "solana" in s:
+        st.dataframe(s.solana,use_container_width=True)
+    st.caption("DEX Screener profilleri yeni mint garantisi değildir. Mint, LP ve honeypot doğrulanmadı.")
+    st.subheader("Sanal bakiye grafiği")
+    st.line_chart(s.curve)
+    st.subheader("İşlem günlüğü")
+    st.dataframe(s.ledger[-200:],use_container_width=True)
+    st.caption("Geçmiş yalnızca bu oturumda saklanır; sayfa kapanırsa kaybolabilir.")
+panel()
+st.subheader("8 ajan durumu")
+st.dataframe([
+    {"Ajan":"Tarayıcı","Durum":"Borsa ve Solana veri taraması"},
+    {"Ajan":"Risk","Durum":"Borsa defteri, %1 limit, %2 kayma"},
+    {"Ajan":"Nişancı","Durum":"Yalnızca varsayımsal dolum"},
+    {"Ajan":"Balina","Durum":"Henüz entegre değil"},
+    {"Ajan":"Rug","Durum":"Solana işlemleri engelli"},
+    {"Ajan":"Çıkış","Durum":"Arbitraj iki taraflı simülasyon; açık pozisyon yok"},
+    {"Ajan":"Hype","Durum":"Henüz entegre değil"},
+    {"Ajan":"Masa yöneticisi","Durum":"Panel ve oturum günlüğü"},
+],use_container_width=True)
