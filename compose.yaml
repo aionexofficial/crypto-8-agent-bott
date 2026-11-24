@@ -1,0 +1,19 @@
+services:
+  worker:
+    build: .
+    command: python worker.py
+    restart: unless-stopped
+    volumes:
+      - paper_data:/data
+  panel:
+    build: .
+    command: streamlit run panel_v3.py --server.address=0.0.0.0
+    restart: unless-stopped
+    environment:
+      PANEL_PASSWORD: ${PANEL_PASSWORD:?set PANEL_PASSWORD}
+    volumes:
+      - paper_data:/data
+    ports:
+      - "127.0.0.1:8501:8501"
+volumes:
+  paper_data:
