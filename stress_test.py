@@ -5,7 +5,7 @@ def stress(seed=42):
     balance=1000.
     rows=[]
     for i in range(50):
-        budget=balance*.30
+        budget=balance*.10
         change=rng.uniform(-.35,.45)
         qty=budget/(100*(1+FEE)*(1+MAX_SLIPPAGE))
         try:
